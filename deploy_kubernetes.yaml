@@ -1,0 +1,32 @@
+---
+
+- name: Setup Kubernetes Controller
+  hosts: tag_controlplane  # controller host group name
+  become: true
+  roles:
+    - controller
+
+
+
+- name: Setup Kubernetes Cluster
+  hosts: tag_bastion_host  # bastion host group name
+  become: true
+  roles:
+    - bastion_host
+    
+
+
+        
+- name: Setup Kubernetes Worker
+  hosts: tag_worker  # worker host group name
+  become: true
+  roles:
+    - worker
+
+
+
+
+
+
+
+

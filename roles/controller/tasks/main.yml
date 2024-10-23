@@ -1,0 +1,106 @@
+---    
+    - name: Disable swap
+      ansible.builtin.command:
+        cmd: "swapoff -a"
+      become_user: root
+    
+    - name: Reset zram if it exists
+      ansible.builtin.command:
+        cmd: "zramctl --reset /dev/zram0"
+      ignore_errors: yes  # Ignore errors if zram0 does not exist
+
+    - name: Ensure /etc/yum.repos.d directory exists
+      ansible.builtin.file:
+        path: /etc/yum.repos.d
+        state: directory
+        mode: '0755'
+
+    - name: Touch /etc/yum.repos.d/kubernetes.repo file
+      ansible.builtin.file:
+        path: /etc/yum.repos.d/kubernetes.repo
+        state: touch
+        mode: '0644'
+
+    - name: Add kubernetes repository using blockinfile
+      ansible.builtin.blockinfile:
+        path: /etc/yum.repos.d/kubernetes.repo
+        marker: "# {mark} ANSIBLE MANAGED BLOCK"
+        block: |
+          [kubernetes]
+          baseurl = https://pkgs.k8s.io/core:/stable:/v1.26/rpm/
+          exclude = kubelet cri-tools kubernetes-cni
+          gpgkey = https://pkgs.k8s.io/core:/stable:/v1.26/rpm/repodata/repomd.xml.key
+          name = kubernetes yum repo
+          repo_gpgcheck = 1
+          
+    - name: Install required packages
+      ansible.builtin.package:
+        name: "{{ item }}"
+        state: present
+      args:
+        disable_excludes: kubernetes
+      loop:
+        - docker
+        - kubelet
+        - kubeadm
+        - kubectl
+      
+      vars:
+        ansible_python_interpreter: /usr/bin/python2
+
+    - name: Enable and start services
+      systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: restarted
+      loop:
+        - docker
+        - kubelet
+
+    - name: Initialize Kubernetes if no configuration file exists
+      shell: "sudo kubeadm init --pod-network-cidr=10.244.0.0/16 --ignore-preflight-errors=NumCPU,Mem"
+      args:
+        creates: /etc/kubernetes/kubelet.conf
+
+    - name: Setup kubeconfig
+      block:
+        - name: chmod kubeconfig file
+          file:
+            path: /etc/kubernetes/admin.conf
+            mode: '0644'
+            
+        - name: Ensure ~/.kube directory exists
+          ansible.builtin.file:
+            path: ~/.kube
+            state: directory
+            mode: '0700'
+            owner: "{{ ansible_user_id }}"
+            group: "{{ ansible_user_id }}"
+            
+        - name: Copy kubeconfig file
+          ansible.builtin.copy:
+            src: "/etc/kubernetes/admin.conf"
+            dest: "~/.kube/config"
+            remote_src: yes
+          become: true
+          become_user: root
+          
+        - name: Set ownership for ~/.kube/config
+          ansible.builtin.command:
+            cmd: "chown {{ ansible_user_id }}:{{ ansible_user_id }} ~/.kube/config"
+            
+    - name: Check if Flannel pod exists
+      ansible.builtin.shell:
+        cmd: "kubectl get pods --all-namespaces | grep kube-flannel"
+      ignore_errors: yes
+      
+      register: flannel_pod_status
+    
+    - name: Install Flannel if pod does not exist
+      ansible.builtin.command:
+        cmd: "kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml"
+      when: flannel_pod_status.rc != 0
+      
+    - name: Copy join command to the worker
+      ansible.builtin.shell:
+        cmd: "kubeadm token create --print-join-command > join-command.sh"
